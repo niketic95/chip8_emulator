@@ -2,16 +2,24 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("SDL3/SDL.h");
 });
+const chip8 = @import("chip8");
 
 const log = std.log;
+const mem = std.mem;
+const Chip8 = chip8.Chip8;
+
+const CHIP8_WINDOW = "Chip8 Emulator";
 
 pub fn main() !void {
+    const emulator: Chip8 = Chip8.init();
+    _ = emulator;
+
     if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
         log.err("SDL_Init: {s}\n", .{c.SDL_GetError()});
     }
     defer c.SDL_Quit();
 
-    const window = c.SDL_CreateWindow("Chip8 EMU", 640, 480, 0);
+    const window = c.SDL_CreateWindow(CHIP8_WINDOW, chip8.cfg.CHIP8_WIDTH * chip8.cfg.CHIP8_MULTIPLIER, chip8.cfg.CHIP8_HEIGHT * chip8.cfg.CHIP8_MULTIPLIER, c.SDL_WINDOW_BORDERLESS);
     if (window == null) {
         log.err("SDL_CreateWindow: {s}", .{c.SDL_GetError()});
     }
