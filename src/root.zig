@@ -16,12 +16,15 @@ const Chip8Registers = struct {
 
 const Chip8Stack = [cfg.CHIP8_STACK]u16;
 
+const Chip8KeyboardStatus = [cfg.CHIP8_KEYS]u1;
+
 const EmulatorError = error{ StackOverflow, StackEmpty };
 
 pub const Chip8 = struct {
     memory: Chip8Memory,
     stack: Chip8Stack,
     regs: Chip8Registers,
+    keys: Chip8KeyboardStatus,
 
     pub fn pusha(self: *Chip8, addr: u16) EmulatorError!void {
         if (self.regs.sp +% 1 >= cfg.CHIP8_STACK) {
@@ -49,6 +52,7 @@ pub const Chip8 = struct {
                 .dt = 0,
                 .st = 0,
             },
+            .keys = .{0} ** cfg.CHIP8_KEYS,
         };
     }
 };
