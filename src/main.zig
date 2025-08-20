@@ -96,7 +96,7 @@ pub fn main() !void {
         log.err("SDL_CreateRenderer: {s}", .{c.SDL_GetError()});
     }
 
-    if (!c.SDL_SetRenderDrawColor(renderer, 255, 0, 0, c.SDL_ALPHA_OPAQUE))
+    if (!c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, c.SDL_ALPHA_OPAQUE))
         log.err("SDL_SetRendererDrawColor: {s}", .{c.SDL_GetError()});
 
     if (!c.SDL_RenderClear(renderer))

@@ -6,4 +6,5 @@ pub const DEFAULT_CFG = .{
     .CHIP8_GPR = 16,
     .CHIP8_STACK = 16,
     .CHIP8_KEYS = 16,
+    .CHIP8_CHAR_SET_SIZE = 0x50,
 };

@@ -20,6 +20,27 @@ const Chip8KeyboardStatus = [cfg.CHIP8_KEYS]u1;
 
 const EmulatorError = error{ StackOverflow, StackEmpty };
 
+fn gen_default_bitmaps() [cfg.CHIP8_CHAR_SET_SIZE]u8 {
+    return .{
+        0xF0, 0x90, 0x90, 0x90, 0xF0, // '0'
+        0x20, 0x60, 0x20, 0x20, 0x70, // '1'
+        0xF0, 0x10, 0xF0, 0x80, 0xF0, // '2'
+        0xF0, 0x10, 0xF0, 0x10, 0xF0, // '3'
+        0x90, 0x90, 0xF0, 0x10, 0x10, // '4'
+        0xF0, 0x80, 0xF0, 0x10, 0xF0, // '5'
+        0xF0, 0x80, 0xF0, 0x90, 0xF0, // '6'
+        0xF0, 0x10, 0x20, 0x40, 0x40, // '7'
+        0xF0, 0x90, 0xF0, 0x90, 0xF0, // '8'
+        0xF0, 0x90, 0xF0, 0x10, 0xF0, // '9'
+        0xF0, 0x90, 0xF0, 0x90, 0x90, // 'A'
+        0xE0, 0x90, 0xE0, 0x90, 0xE0, // 'B'
+        0xF0, 0x80, 0x80, 0x80, 0xF0, // 'C'
+        0xE0, 0x90, 0x90, 0x90, 0xE0, // 'D'
+        0xF0, 0x80, 0xF0, 0x80, 0xF0, // 'E'
+        0xF0, 0x80, 0xF0, 0x80, 0x80, // 'F'
+    };
+}
+
 pub const Chip8 = struct {
     memory: Chip8Memory,
     stack: Chip8Stack,
@@ -42,7 +63,7 @@ pub const Chip8 = struct {
     }
     pub fn init() Chip8 {
         return .{
-            .memory = .{0} ** cfg.CHIP8_MEMORY_SIZE,
+            .memory = gen_default_bitmaps() ++ .{0} ** (cfg.CHIP8_MEMORY_SIZE - cfg.CHIP8_CHAR_SET_SIZE),
             .stack = .{0} ** cfg.CHIP8_STACK,
             .regs = .{
                 .v = .{0} ** cfg.CHIP8_GPR,
@@ -58,6 +79,11 @@ pub const Chip8 = struct {
 };
 
 const testing = std.testing;
+
+test "init" {
+    const emulator = Chip8.init();
+    try std.testing.expect(std.mem.eql(u8, gen_default_bitmaps()[0..], emulator.memory[0..cfg.CHIP8_CHAR_SET_SIZE]));
+}
 
 test "stack" {
     var emulator = Chip8.init();
