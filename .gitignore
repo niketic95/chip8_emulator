@@ -1,2 +1,4 @@
 zig-out
 .zig-cache
+inc/SDL3
+lib/win

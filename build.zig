@@ -6,7 +6,7 @@ const std = @import("std");
 // for defining build steps and express dependencies between them, allowing the
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -89,6 +89,11 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
+    if (target.result.os.tag == .windows) {
+        exe.root_module.addLibraryPath(b.path("lib/win"));
+        exe.root_module.addIncludePath(b.path("inc/win"));
+    }
+
     exe.root_module.link_libc = true;
     exe.root_module.linkSystemLibrary("SDL3", .{});
 
@@ -106,6 +111,14 @@ pub fn build(b: *std.Build) void {
     // how this Run step will be executed. In our case we want to run it when
     // the user runs `zig build run`, so we create a dependency link.
     const run_cmd = b.addRunArtifact(exe);
+    if (target.result.os.tag == .windows) {
+        const alloc = std.heap.page_allocator;
+        var path: []u8 = undefined;
+
+        path = try std.fs.cwd().realpathAlloc(alloc, "lib/win");
+
+        run_cmd.addPathDir(path);
+    }
     run_step.dependOn(&run_cmd.step);
 
     // By making the run step depend on the default step, it will be run from the
