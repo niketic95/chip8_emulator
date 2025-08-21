@@ -63,6 +63,26 @@ fn handle_emulator_timers(emulator: *Chip8, ellapsed_ns: u64, stream: ?*c.SDL_Au
     }
 }
 
+fn handle_screen(emu: *const Chip8, renderer: ?*c.SDL_Renderer) void {
+    _ = c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, c.SDL_ALPHA_OPAQUE);
+    _ = c.SDL_RenderClear(renderer);
+
+    _ = c.SDL_SetRenderDrawColor(renderer, 255, 255, 255, c.SDL_ALPHA_OPAQUE);
+    for (emu.screen, 0..) |line, y| {
+        for (line, 0..) |pixel, x| {
+            if (pixel == 1) {
+                _ = c.SDL_RenderFillRect(renderer, &.{
+                    .x = @floatFromInt(x * chip8.cfg.CHIP8_MULTIPLIER),
+                    .y = @floatFromInt(y * chip8.cfg.CHIP8_MULTIPLIER),
+                    .w = chip8.cfg.CHIP8_MULTIPLIER,
+                    .h = chip8.cfg.CHIP8_MULTIPLIER,
+                });
+            }
+        }
+    }
+    _ = c.SDL_RenderPresent(renderer);
+}
+
 pub fn main() !void {
     var emulator: Chip8 = Chip8.init();
     var event: c.SDL_Event = undefined;
@@ -96,15 +116,6 @@ pub fn main() !void {
         log.err("SDL_CreateRenderer: {s}", .{c.SDL_GetError()});
     }
 
-    if (!c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, c.SDL_ALPHA_OPAQUE))
-        log.err("SDL_SetRendererDrawColor: {s}", .{c.SDL_GetError()});
-
-    if (!c.SDL_RenderClear(renderer))
-        log.err("SDL_RenderClear: {s}", .{c.SDL_GetError()});
-
-    if (!c.SDL_RenderPresent(renderer))
-        log.err("SDL_RenderPresent: {s}", .{c.SDL_GetError()});
-
     stream = c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, null, null);
 
     if (stream == null) {
@@ -114,7 +125,15 @@ pub fn main() !void {
     generate_tone(&samples, AUDIO_SAMPLE_RATE, 329, 0.5);
 
     _ = c.SDL_ResumeAudioStreamDevice(stream);
+
+    // ** TO DETELETE **
     emulator.regs.st = 120;
+    emulator.drawFromMemory(0, 0, emulator.memory[0..5]);
+    emulator.drawFromMemory(16, 30, emulator.memory[5..10]);
+    emulator.drawFromMemory(60, 30, emulator.memory[0..5]);
+    emulator.screen[0][1] = 1; // For testing collision
+    // ** TO DELETE **
+
     time_start = try std.time.Instant.now();
     out: while (true) {
         while (c.SDL_PollEvent(&event)) {
@@ -133,6 +152,7 @@ pub fn main() !void {
                 }
             }
         }
+        handle_screen(&emulator, renderer);
         time_end = try std.time.Instant.now();
         handle_emulator_timers(&emulator, time_end.since(time_start), stream, &samples);
         time_start = try std.time.Instant.now();

@@ -18,6 +18,8 @@ const Chip8Stack = [cfg.CHIP8_STACK]u16;
 
 const Chip8KeyboardStatus = [cfg.CHIP8_KEYS]u1;
 
+const Chip8Screen = [cfg.CHIP8_HEIGHT][cfg.CHIP8_WIDTH]u1;
+
 const EmulatorError = error{ StackOverflow, StackEmpty };
 
 fn gen_default_bitmaps() [cfg.CHIP8_CHAR_SET_SIZE]u8 {
@@ -46,15 +48,16 @@ pub const Chip8 = struct {
     stack: Chip8Stack,
     regs: Chip8Registers,
     keys: Chip8KeyboardStatus,
+    screen: Chip8Screen,
 
-    pub fn pusha(self: *Chip8, addr: u16) EmulatorError!void {
+    pub fn pusha(self: *@This(), addr: u16) EmulatorError!void {
         if (self.regs.sp +% 1 >= cfg.CHIP8_STACK) {
             return error.StackOverflow;
         }
         self.regs.sp +%= 1;
         self.stack[self.regs.sp] = addr;
     }
-    pub fn popa(self: *Chip8) EmulatorError!u16 {
+    pub fn popa(self: *@This()) EmulatorError!u16 {
         if (self.regs.sp == std.math.maxInt(u8)) {
             return error.StackEmpty;
         }
@@ -64,6 +67,7 @@ pub const Chip8 = struct {
     pub fn init() Chip8 {
         return .{
             .memory = gen_default_bitmaps() ++ .{0} ** (cfg.CHIP8_MEMORY_SIZE - cfg.CHIP8_CHAR_SET_SIZE),
+            .screen = .{.{0} ** cfg.CHIP8_WIDTH} ** cfg.CHIP8_HEIGHT,
             .stack = .{0} ** cfg.CHIP8_STACK,
             .regs = .{
                 .v = .{0} ** cfg.CHIP8_GPR,
@@ -75,6 +79,24 @@ pub const Chip8 = struct {
             },
             .keys = .{0} ** cfg.CHIP8_KEYS,
         };
+    }
+
+    pub fn drawFromMemory(self: *@This(), x: u8, y: u8, sprite: []u8) void {
+        for (sprite, 0..) |line, ly| {
+            for (0..8) |lx| {
+                // Need to draw from MSB to LSB
+                if (@as(u8, 0x80) >> @intCast(lx) & line == 0) {
+                    continue;
+                }
+
+                if (self.screen[(y + ly) % cfg.CHIP8_HEIGHT][(x + lx) % cfg.CHIP8_WIDTH] == 1) {
+                    //Collision
+                    self.regs.v[0xf] = 1;
+                }
+
+                self.screen[(y + ly) % cfg.CHIP8_HEIGHT][(x + lx) % cfg.CHIP8_WIDTH] ^= 1;
+            }
+        }
     }
 };
 
