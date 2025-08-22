@@ -90,8 +90,8 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(exe);
 
     if (target.result.os.tag == .windows) {
-        exe.root_module.addLibraryPath(b.path("lib/win"));
-        exe.root_module.addIncludePath(b.path("inc/win"));
+        exe.root_module.addLibraryPath(b.path("lib\\win"));
+        exe.root_module.addIncludePath(b.path("inc"));
     }
 
     exe.root_module.link_libc = true;
@@ -115,7 +115,7 @@ pub fn build(b: *std.Build) !void {
         const alloc = std.heap.page_allocator;
         var path: []u8 = undefined;
 
-        path = try std.fs.cwd().realpathAlloc(alloc, "lib/win");
+        path = try std.fs.cwd().realpathAlloc(alloc, "lib\\win");
 
         run_cmd.addPathDir(path);
     }

@@ -1,6 +1,7 @@
 //! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
 
+const Allocator = std.mem.Allocator;
 pub const cfg = @import("config.zig").DEFAULT_CFG;
 
 const Chip8Memory = [cfg.CHIP8_MEMORY_SIZE]u8;
@@ -44,6 +45,7 @@ fn gen_default_bitmaps() [cfg.CHIP8_CHAR_SET_SIZE]u8 {
 }
 
 pub const Chip8 = struct {
+    // alloc: Allocator,
     memory: Chip8Memory,
     stack: Chip8Stack,
     regs: Chip8Registers,
@@ -79,6 +81,22 @@ pub const Chip8 = struct {
             },
             .keys = .{0} ** cfg.CHIP8_KEYS,
         };
+    }
+
+    pub fn loadROM(self: *@This(), file_path: []const u8) !void {
+        _ = self;
+        var file: std.fs.File = undefined;
+        // var buffer: [256]u8 = .{};
+        var buffer: [4]u8 = undefined;
+
+        if (std.fs.path.isAbsolute(file_path)) {
+            file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_only });
+        } else {
+            file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only });
+        }
+        defer file.close();
+        const reader = file.reader(&buffer);
+        std.debug.print("{s}", .{reader.interface.buffer});
     }
 
     pub fn drawFromMemory(self: *@This(), x: u8, y: u8, sprite: []u8) void {
