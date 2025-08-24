@@ -12,14 +12,16 @@ const CHIP8_WINDOW = "Chip8 Emulator";
 const AUDIO_SAMPLE_RATE = 8000; // 8KHz sample rate
 const CHANNELS = 1; // Mono
 const TIMER_FREQ_HZ = 60;
+const DELAY_TIMER_TICK_RATE = @divTrunc(std.time.ns_per_s, TIMER_FREQ_HZ);
+const EMULATOR_FREQ_HZ = 10_000;
+const EMULATOR_EXEC_RATE = @divTrunc(std.time.ns_per_s, EMULATOR_FREQ_HZ);
 
 const key_map: [0x4B]?u32 = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 } ++ [_]?u32{null} ** 39 ++ [_]u32{ 0xA, 0xB, 0xC, 0xD, 0xE, 0xF } ++ [_]?u32{null} ** 20;
 
 fn handleKeys(key: u32, press: u1, emulator: *Chip8) void {
     if (key >= '0' and key <= 'z') {
-        const key_mapped = key_map[key - '0'];
-        if (key_mapped != null) {
-            emulator.keys[key_mapped.?] = press;
+        if (key_map[key - '0']) |mapped_key| {
+            emulator.keys[mapped_key] = press;
         }
     }
 }
@@ -30,16 +32,15 @@ fn generateTone(samples: []f32, sr: u32, tone: u32, volume: f32) void {
     }
 }
 
-fn handleEmulatorTimers(emulator: *Chip8, ellapsed_ns: u64, stream: ?*c.SDL_AudioStream, samples: []const f32) void {
-    if (emulator.regs.dt == 0 and emulator.regs.st == 0) {
-        return;
-    }
+fn handleEmulatorExec(emulator: *Chip8, timer: *std.time.Timer) !void {
+    if (timer.read() < EMULATOR_EXEC_RATE) return;
 
-    const tick_rate: u64 = @divTrunc(std.time.ns_per_s, 60);
+    timer.reset();
+    try emulator.step();
+}
 
-    if (tick_rate > ellapsed_ns) {
-        c.SDL_DelayNS(tick_rate - ellapsed_ns);
-    }
+fn handleEmulatorTimers(emulator: *Chip8, timer: *std.time.Timer, stream: ?*c.SDL_AudioStream, samples: []const f32) void {
+    if (timer.read() < DELAY_TIMER_TICK_RATE) return;
 
     if (emulator.regs.dt != 0) {
         emulator.regs.dt -= 1;
@@ -47,7 +48,7 @@ fn handleEmulatorTimers(emulator: *Chip8, ellapsed_ns: u64, stream: ?*c.SDL_Audi
 
     if (emulator.regs.st != 0) {
         const queued_samples: u64 = @intCast(c.SDL_GetAudioStreamQueued(stream));
-        const samples_needed_for_timer: u64 = @divTrunc(emulator.regs.st * tick_rate * AUDIO_SAMPLE_RATE, std.time.ns_per_s);
+        const samples_needed_for_timer: u64 = @divTrunc(@as(u64, emulator.regs.st) * DELAY_TIMER_TICK_RATE * AUDIO_SAMPLE_RATE, std.time.ns_per_s);
 
         // Check if we need ot feed more samples to the audio stream
         if (queued_samples < samples_needed_for_timer) {
@@ -96,14 +97,34 @@ fn processArgs(alloc: std.mem.Allocator) ![]const u8 {
     return alloc.dupe(u8, iter_mem);
 }
 
+fn handleSDLEvents(emulator: *Chip8) bool {
+    var event: c.SDL_Event = undefined;
+    while (c.SDL_PollEvent(&event)) {
+        if (event.type == c.SDL_EVENT_KEY_UP) {
+            handleKeys(event.key.key, 0, emulator);
+        }
+        if (event.type == c.SDL_EVENT_KEY_DOWN) {
+            handleKeys(event.key.key, 1, emulator);
+            switch (event.key.scancode) {
+                c.SDL_SCANCODE_F4 => {
+                    if (event.key.mod & c.SDL_KMOD_ALT != 0) {
+                        return true;
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+    return false;
+}
+
 pub fn main() !void {
     var emulator: Chip8 = Chip8.init();
-    var event: c.SDL_Event = undefined;
-    var time_end: std.time.Instant = undefined;
-    var time_start: std.time.Instant = undefined;
     var stream: ?*c.SDL_AudioStream = null;
     var samples: [AUDIO_SAMPLE_RATE]f32 = .{0} ** AUDIO_SAMPLE_RATE;
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    var delay_timer: std.time.Timer = undefined;
+    var emulator_timer: std.time.Timer = undefined;
     const alloc = gpa.allocator();
     const spec: c.SDL_AudioSpec = .{ .channels = CHANNELS, .format = c.SDL_AUDIO_F32, .freq = AUDIO_SAMPLE_RATE };
 
@@ -147,42 +168,19 @@ pub fn main() !void {
         log.err("SDL_OpenAudioDeviceStream: {s}", .{c.SDL_GetError()});
     }
 
-    generateTone(&samples, AUDIO_SAMPLE_RATE, 329, 1.0);
+    generateTone(&samples, AUDIO_SAMPLE_RATE, 329, 0.5);
 
     try emulator.loadROM(rom_file_path);
 
     _ = c.SDL_ResumeAudioStreamDevice(stream);
 
-    // ** TO DETELETE **
-    emulator.regs.st = 250;
-    emulator.drawFromMemory(0, 0, emulator.memory[0..5]);
-    emulator.drawFromMemory(16, 30, emulator.memory[5..10]);
-    emulator.drawFromMemory(60, 30, emulator.memory[0..5]);
-    emulator.drawFromMemory(30, 15, emulator.memory[10..15]);
-    emulator.screen[0][1] = 1; // For testing collision
-    // ** TO DELETE **
+    delay_timer = try std.time.Timer.start();
+    emulator_timer = try std.time.Timer.start();
 
-    time_start = try std.time.Instant.now();
-    out: while (true) {
-        while (c.SDL_PollEvent(&event)) {
-            if (event.type == c.SDL_EVENT_KEY_UP) {
-                handleKeys(event.key.key, 0, &emulator);
-            }
-            if (event.type == c.SDL_EVENT_KEY_DOWN) {
-                handleKeys(event.key.key, 1, &emulator);
-                switch (event.key.scancode) {
-                    c.SDL_SCANCODE_F4 => {
-                        if (event.key.mod & c.SDL_KMOD_ALT != 0) {
-                            break :out;
-                        }
-                    },
-                    else => {},
-                }
-            }
-        }
+    while (true) {
+        if (handleSDLEvents(&emulator)) break;
+        try handleEmulatorExec(&emulator, &emulator_timer);
         handleScreen(&emulator, renderer);
-        time_end = try std.time.Instant.now();
-        handleEmulatorTimers(&emulator, time_end.since(time_start), stream, &samples);
-        time_start = try std.time.Instant.now();
+        handleEmulatorTimers(&emulator, &delay_timer, stream, &samples);
     }
 }
