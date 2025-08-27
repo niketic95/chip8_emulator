@@ -2,27 +2,25 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
-pub const cfg = @import("config.zig").DEFAULT_CFG;
+const Timer = std.time.Timer;
 
+pub const cfg = @import("config.zig").DEFAULT_CFG;
 const OPCODE_SIZE = 0x2;
+const DISPLAY_FREQ_HZ = 60;
+const DISPLAY_TIMER_TICK_RATE = @divTrunc(std.time.ns_per_s, DISPLAY_FREQ_HZ);
 
 const Chip8Memory = [cfg.CHIP8_MEMORY_SIZE]u8;
-
 const Chip8Registers = struct {
     v: [cfg.CHIP8_GPR]u8,
-    i: u16, //TODO:arbitrary-bit-width https://ziglang.org/documentation/master/#toc-Runtime-Integer-Values
-    pc: u16, // TODO:arbitrary-bit-width https://ziglang.org/documentation/master/#toc-Runtime-Integer-Values
+    i: u12,
+    pc: u12,
     sp: u8,
     st: u8,
     dt: u8,
 };
-
-const Chip8Stack = [cfg.CHIP8_STACK]u16;
-
+const Chip8Stack = [cfg.CHIP8_STACK]u12;
 const Chip8KeyboardStatus = [cfg.CHIP8_KEYS]u1;
-
 const Chip8Screen = [cfg.CHIP8_HEIGHT][cfg.CHIP8_WIDTH]u1;
-
 const EmulatorError = error{ StackOverflow, StackEmpty, ExecutionError };
 
 fn gen_default_bitmaps() [cfg.CHIP8_CHAR_SET_SIZE]u8 {
@@ -46,221 +44,23 @@ fn gen_default_bitmaps() [cfg.CHIP8_CHAR_SET_SIZE]u8 {
     };
 }
 
-const CatOp = fn (self: *Chip8, opcode: u12) void;
-
-fn cat0_op(emu: *Chip8, opcode: u12) void {
-    switch (opcode) {
-        0xE0 => {
-            @memset(&emu.screen, .{0} ** 64);
-            emu.regs.pc += 2;
-        },
-        0xEE => {
-            emu.regs.pc = emu.popa() catch |err| {
-                std.log.err("Failed to pop address:{}", .{err});
-                std.process.abort();
-            };
-        },
-        else => {},
-    }
-}
-
-fn cat1_op(emu: *Chip8, opcode: u12) void {
-    emu.regs.pc = opcode;
-}
-
-fn cat2_op(emu: *Chip8, opcode: u12) void {
-    emu.pusha(emu.regs.pc + 2) catch |err| {
-        std.log.err("Failed to push address:{}", .{err});
-        std.process.abort();
-    };
-    emu.regs.pc = opcode;
-}
-
-fn cat3_op(emu: *Chip8, opcode: u12) void {
-    const skip = @as(u8, @intFromBool(emu.regs.v[opcode >> 8] == opcode & 0xff)) * 2;
-    emu.regs.pc += 2 + skip;
-}
-
-fn cat4_op(emu: *Chip8, opcode: u12) void {
-    const skip = @as(u8, @intFromBool(emu.regs.v[opcode >> 8] != opcode & 0xff)) * 2;
-    emu.regs.pc += 2 + skip;
-}
-
-fn cat5_op(emu: *Chip8, opcode: u12) void {
-    const skip = @as(u8, @intFromBool(emu.regs.v[opcode >> 8] == emu.regs.v[(opcode >> 4) & 0xf])) * 2;
-    emu.regs.pc += 2 + skip;
-}
-
-fn cat6_op(emu: *Chip8, opcode: u12) void {
-    emu.regs.v[opcode >> 8] = @intCast(opcode & 0xff);
-    emu.regs.pc += 2;
-}
-
-fn cat7_op(emu: *Chip8, opcode: u12) void {
-    emu.regs.v[opcode >> 8] +%= @intCast(opcode & 0xff);
-    emu.regs.pc += 2;
-}
-
-fn cat8_op(emu: *Chip8, opcode: u12) void {
-    switch (opcode & 0xf) {
-        0 => {
-            emu.regs.v[opcode >> 8] = emu.regs.v[(opcode >> 4) & 0xf];
-        },
-        1 => {
-            emu.regs.v[opcode >> 8] |= emu.regs.v[(opcode >> 4) & 0xf];
-        },
-        2 => {
-            emu.regs.v[opcode >> 8] &= emu.regs.v[(opcode >> 4) & 0xf];
-        },
-        3 => {
-            emu.regs.v[opcode >> 8] ^= emu.regs.v[(opcode >> 4) & 0xf];
-        },
-        4 => {
-            const res = @addWithOverflow(emu.regs.v[opcode >> 8], emu.regs.v[(opcode >> 4) & 0xf]);
-            emu.regs.v[opcode >> 8] = res[0];
-            emu.regs.v[0xf] = res[1];
-        },
-        5 => {
-            const res = @subWithOverflow(emu.regs.v[opcode >> 8], emu.regs.v[(opcode >> 4) & 0xf]);
-            emu.regs.v[opcode >> 8] = res[0];
-            emu.regs.v[0xf] = ~res[1];
-        },
-        6 => {
-            const tmp = emu.regs.v[opcode >> 8] & 0x1;
-            emu.regs.v[opcode >> 8] >>= 1;
-            emu.regs.v[0xf] = tmp;
-        },
-        7 => {
-            const res = @subWithOverflow(emu.regs.v[(opcode >> 4) & 0xf], emu.regs.v[opcode >> 8]);
-            emu.regs.v[opcode >> 8] = res[0];
-            emu.regs.v[0xf] = ~res[1];
-        },
-        0xE => {
-            const res = @shlWithOverflow(emu.regs.v[opcode >> 8], 1);
-            emu.regs.v[opcode >> 8] = res[0];
-            emu.regs.v[0xf] = res[1];
-        },
-        else => {},
-    }
-    emu.regs.pc += 2;
-}
-
-fn cat9_op(emu: *Chip8, opcode: u12) void {
-    const skip = @as(u8, @intFromBool(emu.regs.v[opcode >> 8] != emu.regs.v[(opcode >> 4) & 0xf])) * 2;
-    emu.regs.pc += 2 + skip;
-}
-
-fn catA_op(emu: *Chip8, opcode: u12) void {
-    emu.regs.i = opcode;
-    emu.regs.pc += 2;
-}
-
-fn catB_op(emu: *Chip8, opcode: u12) void {
-    emu.regs.pc = opcode + emu.regs.v[0];
-}
-
-fn catC_op(emu: *Chip8, opcode: u12) void {
-    emu.regs.v[opcode >> 8] = @as(u8, @intCast(opcode & 0xff)) & std.crypto.random.intRangeAtMost(u8, 0, 255);
-    emu.regs.pc += 2;
-}
-
-fn catD_op(emu: *Chip8, opcode: u12) void {
-    emu.drawFromMemory(emu.regs.v[opcode >> 8], emu.regs.v[(opcode >> 4) & 0xf], emu.memory[emu.regs.i..][0..(opcode & 0xf)]);
-    emu.regs.pc += 2;
-}
-
-fn catE_op(emu: *Chip8, opcode: u12) void {
-    switch (opcode & 0xff) {
-        0x9e => {
-            emu.regs.pc += @as(u8, emu.keys[emu.regs.v[opcode >> 8]]) * 2;
-        },
-        0xa1 => {
-            emu.regs.pc += @as(u8, ~emu.keys[emu.regs.v[opcode >> 8]]) * 2;
-        },
-        else => {},
-    }
-    emu.regs.pc += 2;
-}
-
-fn catF_op(emu: *Chip8, opcode: u12) void {
-    switch (opcode & 0xff) {
-        0x0A => {
-            for (emu.keys, 0..) |key, idx| {
-                if (key == 1) {
-                    emu.regs.v[opcode >> 8] = @intCast(idx);
-                    emu.regs.pc += 2;
-                }
-            }
-            emu.regs.pc -= 2;
-        },
-        0x15 => {
-            emu.regs.dt = emu.regs.v[opcode >> 8];
-        },
-        0x18 => {
-            emu.regs.st = emu.regs.v[opcode >> 8];
-        },
-        0x1E => {
-            emu.regs.i += emu.regs.v[opcode >> 8];
-        },
-        0x29 => {
-            emu.regs.i = emu.regs.v[opcode >> 8] * 0x5;
-        },
-        0x33 => {
-            const num = emu.regs.v[opcode >> 8];
-            emu.memory[emu.regs.i] = @divTrunc(num, 100);
-            emu.memory[emu.regs.i + 1] = @divTrunc(num, 10) % 10;
-            emu.memory[emu.regs.i + 2] = num % 10;
-        },
-        0x55 => {
-            for (0..(opcode >> 8) + 1) |offset| {
-                emu.memory[emu.regs.i + offset] = emu.regs.v[offset];
-            }
-        },
-        0x65 => {
-            for (0..(opcode >> 8) + 1) |offset| {
-                emu.regs.v[offset] = emu.memory[emu.regs.i + offset];
-            }
-        },
-        else => {},
-    }
-    emu.regs.pc += 2;
-}
-
-const instruction_cat_table: [0x10]*const CatOp = .{
-    cat0_op,
-    cat1_op,
-    cat2_op,
-    cat3_op,
-    cat4_op,
-    cat5_op,
-    cat6_op,
-    cat7_op,
-    cat8_op,
-    cat9_op,
-    catA_op,
-    catB_op,
-    catC_op,
-    catD_op,
-    catE_op,
-    catF_op,
-};
-
 pub const Chip8 = struct {
     // alloc: Allocator,
     memory: Chip8Memory,
     stack: Chip8Stack,
     regs: Chip8Registers,
     keys: Chip8KeyboardStatus,
-    screen: Chip8Screen,
+    screen_buffer: Chip8Screen,
+    halt: ?u4,
 
-    pub fn pusha(self: *@This(), addr: u16) EmulatorError!void {
+    pub fn pusha(self: *@This(), addr: u12) EmulatorError!void {
         if (self.regs.sp +% 1 >= cfg.CHIP8_STACK) {
             return error.StackOverflow;
         }
         self.regs.sp +%= 1;
         self.stack[self.regs.sp] = addr;
     }
-    pub fn popa(self: *@This()) EmulatorError!u16 {
+    pub fn popa(self: *@This()) EmulatorError!u12 {
         if (self.regs.sp == std.math.maxInt(u8)) {
             return error.StackEmpty;
         }
@@ -270,29 +70,317 @@ pub const Chip8 = struct {
     pub fn init() Chip8 {
         return .{
             .memory = gen_default_bitmaps() ++ .{0} ** (cfg.CHIP8_MEMORY_SIZE - cfg.CHIP8_CHAR_SET_SIZE),
-            .screen = .{.{0} ** cfg.CHIP8_WIDTH} ** cfg.CHIP8_HEIGHT,
+            .screen_buffer = .{.{0} ** cfg.CHIP8_WIDTH} ** cfg.CHIP8_HEIGHT,
             .stack = .{0} ** cfg.CHIP8_STACK,
             .regs = .{
                 .v = .{0} ** cfg.CHIP8_GPR,
                 .i = 0,
                 .pc = cfg.CHIP8_PROGRAM_LOAD_ADDR, //Start of loaded program
-                // .pc = 0,
                 .sp = std.math.maxInt(u8),
                 .dt = 0,
                 .st = 0,
             },
             .keys = .{0} ** cfg.CHIP8_KEYS,
+            .halt = null,
         };
     }
+
     pub fn step(self: *@This()) EmulatorError!void {
-        if (self.regs.pc + 1 > self.memory[cfg.CHIP8_PROGRAM_LOAD_ADDR..].len) {
+        if (self.regs.pc >= self.memory.len and self.regs.pc < cfg.CHIP8_PROGRAM_LOAD_ADDR) {
+            std.log.err("pc overflow: {x:0>5}", .{self.regs.pc});
             return error.ExecutionError;
         }
 
-        const opcode: u16 = std.mem.readInt(u16, self.memory[self.regs.pc..][0..2], .big);
-        if (opcode == 0) @panic("Unknown Instruction");
+        if (self.halt != null) {
+            return;
+        }
 
-        instruction_cat_table[opcode >> 12](self, @intCast(opcode & (0x0fff)));
+        std.log.debug("pc:{x:0>5}", .{self.regs.pc});
+        const step_addr = pc_val: {
+            const opcode = std.mem.readInt(u16, self.memory[self.regs.pc..][0..2], .big);
+            std.log.debug("op:{x:0>5}", .{opcode});
+            switch (@as(u4, @truncate(opcode >> 12))) {
+                0x0 => {
+                    switch (opcode) {
+                        // clr
+                        0xE0 => {
+                            @memset(&self.screen_buffer, .{0} ** 64);
+                        },
+                        // ret
+                        0xEE => {
+                            self.regs.pc = self.popa() catch |err| {
+                                std.log.err("Failed to pop address:{}", .{err});
+                                return err;
+                            };
+                            break :pc_val 0;
+                        },
+                        // int?
+                        else => {
+                            std.log.warn("Unsuported instruction! op@{x:0>5}:{x:0>5}", .{ self.regs.pc, opcode });
+                        },
+                    }
+                },
+                // jmp
+                0x1 => {
+                    const nnn: u12 = @truncate(opcode);
+                    self.regs.pc = nnn;
+                    break :pc_val 0;
+                },
+                // call
+                0x2 => {
+                    const nnn: u12 = @truncate(opcode);
+                    self.pusha(self.regs.pc + OPCODE_SIZE) catch |err| {
+                        std.log.err("Failed to push address:{}!", .{err});
+                        return err;
+                    };
+                    self.regs.pc = nnn;
+                    break :pc_val 0;
+                },
+                // seq
+                0x3 => {
+                    const nn: u8 = @truncate(opcode);
+                    const x: u4 = @truncate(opcode >> 8);
+                    const seq: u3 = @shlExact(@as(u2, @intFromBool(self.regs.v[x] == nn)), 1);
+                    break :pc_val OPCODE_SIZE + seq;
+                },
+                // sneq
+                0x4 => {
+                    const nn: u8 = @truncate(opcode);
+                    const x: u4 = @truncate(opcode >> 8);
+                    const sneq: u3 = @shlExact(@as(u2, @intFromBool(self.regs.v[x] != nn)), 1);
+                    break :pc_val OPCODE_SIZE + sneq;
+                },
+                // sreq
+                0x5 => {
+                    const n: u4 = @truncate(opcode);
+                    const y: u4 = @truncate(opcode >> 4);
+                    const x: u4 = @truncate(opcode >> 8);
+
+                    if (n != 0) {
+                        std.log.err("Illegal instruction! op@{x:0>5}:{x:0>5}", .{ self.regs.pc, opcode });
+                        return EmulatorError.ExecutionError;
+                    }
+
+                    const sreq: u3 = @shlExact(@as(u2, @intFromBool(self.regs.v[x] == self.regs.v[y])), 1);
+                    break :pc_val OPCODE_SIZE + sreq;
+                },
+                // mov vx immediate
+                0x6 => {
+                    const nn: u8 = @truncate(opcode);
+                    const x: u4 = @truncate(opcode >> 8);
+
+                    self.regs.v[x] = nn;
+                },
+                // add vx immediate
+                0x7 => {
+                    const nn: u8 = @truncate(opcode);
+                    const x: u4 = @truncate(opcode >> 8);
+
+                    self.regs.v[x] +%= nn;
+                },
+                0x8 => {
+                    const sub_op: u4 = @truncate(opcode);
+                    const y: u4 = @truncate(opcode >> 4);
+                    const x: u4 = @truncate(opcode >> 8);
+                    switch (sub_op) {
+                        // mov vx vy
+                        0x0 => {
+                            self.regs.v[x] = self.regs.v[y];
+                        },
+                        // or Vx Vy
+                        0x1 => {
+                            self.regs.v[x] |= self.regs.v[y];
+                            //chip8 quirk
+                            self.regs.v[0xf] = 0x0;
+                        },
+                        // and vx vy
+                        0x2 => {
+                            self.regs.v[x] &= self.regs.v[y];
+                            //chip8 quirk
+                            self.regs.v[0xf] = 0x0;
+                        },
+                        // xor vx vy
+                        0x3 => {
+                            self.regs.v[x] ^= self.regs.v[y];
+                            //chip8 quirk
+                            self.regs.v[0xf] = 0x0;
+                        },
+                        // add vx vy
+                        0x4 => {
+                            const sum = @addWithOverflow(self.regs.v[x], self.regs.v[y]);
+                            self.regs.v[x] = sum[0]; // Actual sum
+                            self.regs.v[0xf] = sum[1]; // Overflow
+                        },
+                        // sub vx vy
+                        0x5 => {
+                            const dif = @subWithOverflow(self.regs.v[x], self.regs.v[y]);
+                            self.regs.v[x] = dif[0]; // Actual sum
+                            self.regs.v[0xf] = ~dif[1]; // Overflow
+                        },
+                        // rsh vx 1
+                        0x6 => {
+                            //Chip8 Quirk
+                            if (true) {
+                                self.regs.v[x] = self.regs.v[y];
+                            }
+
+                            const flag = self.regs.v[x] & 0x1;
+                            self.regs.v[x] >>= 1;
+                            self.regs.v[0xf] = flag;
+                        },
+                        // sub vx vy (alt.)
+                        0x7 => {
+                            const dif = @subWithOverflow(self.regs.v[y], self.regs.v[x]);
+                            self.regs.v[x] = dif[0];
+                            self.regs.v[0xf] = ~dif[1]; // Overflow
+                        },
+                        // lsh vx 1
+                        0xe => {
+                            //Chip8 Quirk
+                            if (true) {
+                                self.regs.v[x] = self.regs.v[y];
+                            }
+
+                            const lsh = @shlWithOverflow(self.regs.v[x], 1);
+                            self.regs.v[x] = lsh[0];
+                            self.regs.v[0xf] = lsh[1];
+                        },
+                        else => {
+                            std.log.err("Illegal instruction! op@{x:0>5}:{x:0>5}", .{ self.regs.pc, opcode });
+                            return EmulatorError.ExecutionError;
+                        },
+                    }
+                },
+                // srneq
+                0x9 => {
+                    const n: u4 = @truncate(opcode);
+                    const y: u4 = @truncate(opcode >> 4);
+                    const x: u4 = @truncate(opcode >> 8);
+
+                    if (n != 0) {
+                        std.log.err("Illegal instruction! op@{x:0>5}:{x:0>5}", .{ self.regs.pc, opcode });
+                        return EmulatorError.ExecutionError;
+                    }
+
+                    const srneq: u3 = @shlExact(@as(u2, @intFromBool(self.regs.v[x] != self.regs.v[y])), 1);
+                    break :pc_val OPCODE_SIZE + srneq;
+                },
+                // seti
+                0xA => {
+                    const nnn: u12 = @truncate(opcode);
+                    self.regs.i = nnn;
+                },
+                // acc v0
+                0xB => {
+                    const nnn: u12 = @truncate(opcode);
+                    self.regs.pc = nnn + @as(u12, self.regs.v[0]);
+                    break :pc_val 0;
+                },
+                // rand vx
+                0xC => {
+                    const nn: u8 = @truncate(opcode);
+                    const x: u4 = @truncate(opcode >> 8);
+                    self.regs.v[x] = nn & std.crypto.random.intRangeAtMost(u8, 0, 255);
+                },
+                // drw vx vy n
+                0xD => {
+                    const n: u4 = @truncate(opcode);
+                    const y: u4 = @truncate(opcode >> 4);
+                    const x: u4 = @truncate(opcode >> 8);
+
+                    self.drawFromMemory(self.regs.v[x], self.regs.v[y], self.memory[self.regs.i..][0..n]);
+                },
+                // key ops
+                0xE => {
+                    const sub_op: u8 = @truncate(opcode);
+                    const x: u4 = @truncate(opcode >> 8);
+                    const key: u4 = @truncate(self.regs.v[x]);
+                    switch (sub_op) {
+                        // keq vx
+                        0x9E => {
+                            const skip: u3 = @shlExact(@as(u2, @intCast(self.keys[key])), 1);
+                            break :pc_val OPCODE_SIZE + skip;
+                        },
+                        // kneq vx
+                        0xA1 => {
+                            const skip: u3 = @shlExact(@as(u2, @intCast(~self.keys[key])), 1);
+                            break :pc_val OPCODE_SIZE + skip;
+                        },
+                        else => {
+                            std.log.err("Illegal instruction! op@{x:0>5}:{x:0>5}", .{ self.regs.pc, opcode });
+                            return EmulatorError.ExecutionError;
+                        },
+                    }
+                },
+                0xF => {
+                    const sub_op: u8 = @truncate(opcode);
+                    const x: u4 = @truncate(opcode >> 8);
+                    switch (sub_op) {
+                        //mov vx dt
+                        0x07 => self.regs.v[x] = self.regs.dt,
+                        //waitkey
+                        0x0A => {
+                            for (self.keys, 0..) |key, idx| {
+                                if (key == 1) {
+                                    self.regs.v[x] = @intCast(idx);
+                                    self.halt = @intCast(idx);
+                                    break :pc_val OPCODE_SIZE;
+                                }
+                            }
+                            break :pc_val 0;
+                        },
+                        //mov dt vx
+                        0x15 => self.regs.dt = self.regs.v[x],
+                        //mov st vx
+                        0x18 => self.regs.st = self.regs.v[x],
+                        //add i vx
+                        0x1E => self.regs.i += self.regs.v[x],
+                        //mov i vx*5
+                        0x29 => self.regs.i = self.regs.v[x] * 5,
+                        //bcd i vx
+                        0x33 => {
+                            const num = self.regs.v[x];
+                            inline for (0..3) |offset| {
+                                const denominator = comptime std.math.pow(u8, 10, 2 - offset);
+                                self.memory[self.regs.i + offset] = @divTrunc(num, denominator) % 10;
+                            }
+                        },
+                        //ctx str
+                        0x55 => {
+                            for (0..x) |reg_idx| {
+                                self.memory[self.regs.i + reg_idx] = self.regs.v[reg_idx];
+                            }
+
+                            self.memory[self.regs.i + x] = self.regs.v[x];
+
+                            // Chip8 Quirk
+                            if (true) {
+                                self.regs.i += x + 1;
+                            }
+                        },
+                        //ctx rst
+                        0x65 => {
+                            for (0..x) |reg_idx| {
+                                self.regs.v[reg_idx] = self.memory[self.regs.i + reg_idx];
+                            }
+
+                            self.regs.v[x] = self.memory[self.regs.i + x];
+
+                            // Chip8 Quirk
+                            if (true) {
+                                self.regs.i += x + 1;
+                            }
+                        },
+                        else => {
+                            std.log.err("Illegal instruction! op@{x:0>5}:{x:0>5}", .{ self.regs.pc, opcode });
+                            return EmulatorError.ExecutionError;
+                        },
+                    }
+                },
+            }
+            break :pc_val OPCODE_SIZE;
+        };
+        self.regs.pc += step_addr;
     }
 
     pub fn loadROM(self: *@This(), file_path: []const u8) !void {
@@ -327,12 +415,23 @@ pub const Chip8 = struct {
                     continue;
                 }
 
-                if (self.screen[(y + ly) % cfg.CHIP8_HEIGHT][(x + lx) % cfg.CHIP8_WIDTH] == 1) {
-                    //Collision
+                //Chip8 clipping quirk
+                if (true) {
+                    const wrapped_x = x % cfg.CHIP8_WIDTH;
+                    const wrapped_y = y % cfg.CHIP8_HEIGHT;
+
+                    if (wrapped_x + lx > cfg.CHIP8_WIDTH or
+                        wrapped_y + ly > cfg.CHIP8_HEIGHT)
+                    {
+                        continue;
+                    }
+                }
+
+                if (self.screen_buffer[(y + ly) % cfg.CHIP8_HEIGHT][(x + lx) % cfg.CHIP8_WIDTH] == 1) {
                     self.regs.v[0xf] = 1;
                 }
 
-                self.screen[(y + ly) % cfg.CHIP8_HEIGHT][(x + lx) % cfg.CHIP8_WIDTH] ^= 1;
+                self.screen_buffer[(y + ly) % cfg.CHIP8_HEIGHT][(x + lx) % cfg.CHIP8_WIDTH] ^= 1;
             }
         }
     }

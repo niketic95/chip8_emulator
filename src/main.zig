@@ -13,7 +13,9 @@ const AUDIO_SAMPLE_RATE = 8000; // 8KHz sample rate
 const CHANNELS = 1; // Mono
 const TIMER_FREQ_HZ = 60;
 const DELAY_TIMER_TICK_RATE = @divTrunc(std.time.ns_per_s, TIMER_FREQ_HZ);
-const EMULATOR_FREQ_HZ = 10_000;
+const DISPLAY_FREQ_HZ = 30;
+const DISPLAY_TIMER_TICK_RATE = @divTrunc(std.time.ns_per_s, DISPLAY_FREQ_HZ);
+const EMULATOR_FREQ_HZ = 600;
 const EMULATOR_EXEC_RATE = @divTrunc(std.time.ns_per_s, EMULATOR_FREQ_HZ);
 
 const key_map: [0x4B]?u32 = [_]u32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 } ++ [_]?u32{null} ** 39 ++ [_]u32{ 0xA, 0xB, 0xC, 0xD, 0xE, 0xF } ++ [_]?u32{null} ** 20;
@@ -22,6 +24,11 @@ fn handleKeys(key: u32, press: u1, emulator: *Chip8) void {
     if (key >= '0' and key <= 'z') {
         if (key_map[key - '0']) |mapped_key| {
             emulator.keys[mapped_key] = press;
+            if (emulator.halt) |halt| {
+                if (halt == mapped_key) {
+                    emulator.halt = null;
+                }
+            }
         }
     }
 }
@@ -64,12 +71,18 @@ fn handleEmulatorTimers(emulator: *Chip8, timer: *std.time.Timer, stream: ?*c.SD
     }
 }
 
-fn handleScreen(emu: *const Chip8, renderer: ?*c.SDL_Renderer) void {
+fn handleScreen(emu: *Chip8, renderer: ?*c.SDL_Renderer, timer: *std.time.Timer) void {
+    if (timer.read() < DISPLAY_TIMER_TICK_RATE) {
+        return;
+    }
+
+    timer.reset();
+
     _ = c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, c.SDL_ALPHA_OPAQUE);
     _ = c.SDL_RenderClear(renderer);
 
     _ = c.SDL_SetRenderDrawColor(renderer, 255, 255, 255, c.SDL_ALPHA_OPAQUE);
-    for (emu.screen, 0..) |line, y| {
+    for (emu.screen_buffer, 0..) |line, y| {
         for (line, 0..) |pixel, x| {
             if (pixel == 1) {
                 _ = c.SDL_RenderFillRect(renderer, &.{
@@ -125,6 +138,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     var delay_timer: std.time.Timer = undefined;
     var emulator_timer: std.time.Timer = undefined;
+    var display_timer: std.time.Timer = undefined;
     const alloc = gpa.allocator();
     const spec: c.SDL_AudioSpec = .{ .channels = CHANNELS, .format = c.SDL_AUDIO_F32, .freq = AUDIO_SAMPLE_RATE };
 
@@ -176,11 +190,12 @@ pub fn main() !void {
 
     delay_timer = try std.time.Timer.start();
     emulator_timer = try std.time.Timer.start();
+    display_timer = try std.time.Timer.start();
 
     while (true) {
         if (handleSDLEvents(&emulator)) break;
         try handleEmulatorExec(&emulator, &emulator_timer);
-        handleScreen(&emulator, renderer);
+        handleScreen(&emulator, renderer, &display_timer);
         handleEmulatorTimers(&emulator, &delay_timer, stream, &samples);
     }
 }
