@@ -39,15 +39,15 @@ fn generateTone(samples: []f32, sr: u32, tone: u32, volume: f32) void {
     }
 }
 
-fn handleEmulatorExec(emulator: *Chip8, timer: *std.time.Timer) !void {
-    if (timer.read() < EMULATOR_EXEC_RATE) return;
+fn handleEmulatorExec(io: std.Io, emulator: *Chip8, timer: *std.Io.Timestamp) !void {
+    if (timer.untilNow(io, .real).nanoseconds < EMULATOR_EXEC_RATE) return;
 
-    timer.reset();
+    timer.nanoseconds = std.Io.Timestamp.now(io, .real).nanoseconds;
     try emulator.step();
 }
 
-fn handleEmulatorTimers(emulator: *Chip8, timer: *std.time.Timer, stream: ?*c.SDL_AudioStream, samples: []const f32) void {
-    if (timer.read() < DELAY_TIMER_TICK_RATE) return;
+fn handleEmulatorTimers(io: std.Io, emulator: *Chip8, timer: *std.Io.Timestamp, stream: ?*c.SDL_AudioStream, samples: []const f32) void {
+    if (timer.untilNow(io, .real).nanoseconds < DELAY_TIMER_TICK_RATE) return;
 
     if (emulator.regs.dt != 0) {
         emulator.regs.dt -= 1;
@@ -71,12 +71,11 @@ fn handleEmulatorTimers(emulator: *Chip8, timer: *std.time.Timer, stream: ?*c.SD
     }
 }
 
-fn handleScreen(emu: *Chip8, renderer: ?*c.SDL_Renderer, timer: *std.time.Timer) void {
-    if (timer.read() < DISPLAY_TIMER_TICK_RATE) {
+fn handleScreen(io: std.Io, emu: *Chip8, renderer: ?*c.SDL_Renderer, timer: *std.Io.Timestamp) void {
+    if (timer.untilNow(io, .real).nanoseconds < DISPLAY_TIMER_TICK_RATE) {
         return;
     }
-
-    timer.reset();
+    timer.nanoseconds = std.Io.Timestamp.now(io, .real).nanoseconds;
 
     _ = c.SDL_SetRenderDrawColor(renderer, 0, 0, 0, c.SDL_ALPHA_OPAQUE);
     _ = c.SDL_RenderClear(renderer);
@@ -97,12 +96,12 @@ fn handleScreen(emu: *Chip8, renderer: ?*c.SDL_Renderer, timer: *std.time.Timer)
     _ = c.SDL_RenderPresent(renderer);
 }
 
-fn processArgs(alloc: std.mem.Allocator) ![]const u8 {
-    var args = try std.process.argsWithAllocator(alloc);
-    defer args.deinit();
-    _ = args.next();
+fn processArgs(alloc: std.mem.Allocator, args: std.process.Args) ![]const u8 {
+    var args_iter = try args.iterateAllocator(alloc);
+    defer args_iter.deinit();
+    _ = args_iter.skip();
 
-    const iter_mem = args.next() orelse {
+    const iter_mem = args_iter.next() orelse {
         std.log.err("Path to ROM image is required!", .{});
         std.process.exit(1);
     };
@@ -131,24 +130,17 @@ fn handleSDLEvents(emulator: *Chip8) bool {
     return false;
 }
 
-pub fn main() !void {
-    var emulator: Chip8 = Chip8.init();
+pub fn main(init: std.process.Init) !void {
+    var emulator: Chip8 = Chip8.init(init.io);
     var stream: ?*c.SDL_AudioStream = null;
     var samples: [AUDIO_SAMPLE_RATE]f32 = .{0} ** AUDIO_SAMPLE_RATE;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    var delay_timer: std.time.Timer = undefined;
-    var emulator_timer: std.time.Timer = undefined;
-    var display_timer: std.time.Timer = undefined;
-    const alloc = gpa.allocator();
+    var delay_timer: std.Io.Timestamp = undefined;
+    var emulator_timer: std.Io.Timestamp = undefined;
+    var display_timer: std.Io.Timestamp = undefined;
+    const alloc = init.gpa;
     const spec: c.SDL_AudioSpec = .{ .channels = CHANNELS, .format = c.SDL_AUDIO_F32, .freq = AUDIO_SAMPLE_RATE };
 
-    defer {
-        if (gpa.deinit() == .leak) {
-            std.log.err("Leak detected!", .{});
-        }
-    }
-
-    const rom_file_path = try processArgs(alloc);
+    const rom_file_path = try processArgs(alloc, init.minimal.args);
     defer alloc.free(rom_file_path);
 
     if (!c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO)) {
@@ -184,18 +176,18 @@ pub fn main() !void {
 
     generateTone(&samples, AUDIO_SAMPLE_RATE, 329, 0.5);
 
-    try emulator.loadROM(rom_file_path);
+    try emulator.loadROM(init.io, rom_file_path);
 
     _ = c.SDL_ResumeAudioStreamDevice(stream);
 
-    delay_timer = try std.time.Timer.start();
-    emulator_timer = try std.time.Timer.start();
-    display_timer = try std.time.Timer.start();
+    delay_timer = std.Io.Clock.real.now(init.io);
+    emulator_timer = std.Io.Clock.real.now(init.io);
+    display_timer = std.Io.Clock.real.now(init.io);
 
     while (true) {
         if (handleSDLEvents(&emulator)) break;
-        try handleEmulatorExec(&emulator, &emulator_timer);
-        handleScreen(&emulator, renderer, &display_timer);
-        handleEmulatorTimers(&emulator, &delay_timer, stream, &samples);
+        try handleEmulatorExec(init.io, &emulator, &emulator_timer);
+        handleScreen(init.io, &emulator, renderer, &display_timer);
+        handleEmulatorTimers(init.io, &emulator, &delay_timer, stream, &samples);
     }
 }

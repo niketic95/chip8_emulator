@@ -45,7 +45,7 @@ fn gen_default_bitmaps() [cfg.CHIP8_CHAR_SET_SIZE]u8 {
 }
 
 pub const Chip8 = struct {
-    // alloc: Allocator,
+    rng: std.Random.DefaultPrng,
     memory: Chip8Memory,
     stack: Chip8Stack,
     regs: Chip8Registers,
@@ -67,7 +67,7 @@ pub const Chip8 = struct {
         self.regs.sp -%= 1;
         return self.stack[self.regs.sp +% 1];
     }
-    pub fn init() Chip8 {
+    pub fn init(io: std.Io) Chip8 {
         return .{
             .memory = gen_default_bitmaps() ++ .{0} ** (cfg.CHIP8_MEMORY_SIZE - cfg.CHIP8_CHAR_SET_SIZE),
             .screen_buffer = .{.{0} ** cfg.CHIP8_WIDTH} ** cfg.CHIP8_HEIGHT,
@@ -82,6 +82,7 @@ pub const Chip8 = struct {
             },
             .keys = .{0} ** cfg.CHIP8_KEYS,
             .halt = null,
+            .rng = std.Random.DefaultPrng.init(@intCast(std.Io.Timestamp.now(io, .real).toMicroseconds())),
         };
     }
 
@@ -116,7 +117,7 @@ pub const Chip8 = struct {
                         },
                         // int?
                         else => {
-                            std.log.warn("Unsuported instruction! op@{x:0>5}:{x:0>5}", .{ self.regs.pc, opcode });
+                            std.log.warn("Unsupported instruction! op@{x:0>5}:{x:0>5}", .{ self.regs.pc, opcode });
                         },
                     }
                 },
@@ -280,7 +281,7 @@ pub const Chip8 = struct {
                 0xC => {
                     const nn: u8 = @truncate(opcode);
                     const x: u4 = @truncate(opcode >> 8);
-                    self.regs.v[x] = nn & std.crypto.random.intRangeAtMost(u8, 0, 255);
+                    self.regs.v[x] = nn & self.rng.random().intRangeAtMost(u8, 0, 255);
                 },
                 // drw vx vy n
                 0xD => {
@@ -355,7 +356,7 @@ pub const Chip8 = struct {
 
                             // Chip8 Quirk
                             if (true) {
-                                self.regs.i += x + 1;
+                                self.regs.i += @as(u12, x) + 1;
                             }
                         },
                         //ctx rst
@@ -368,7 +369,7 @@ pub const Chip8 = struct {
 
                             // Chip8 Quirk
                             if (true) {
-                                self.regs.i += x + 1;
+                                self.regs.i += @as(u12, x) + 1;
                             }
                         },
                         else => {
@@ -383,21 +384,21 @@ pub const Chip8 = struct {
         self.regs.pc += step_addr;
     }
 
-    pub fn loadROM(self: *@This(), file_path: []const u8) !void {
-        var file: std.fs.File = undefined;
+    pub fn loadROM(self: *@This(), io: std.Io, file_path: []const u8) !void {
+        var file: std.Io.File = undefined;
         var buffer: [1024]u8 = undefined;
-        var reader: std.fs.File.Reader = undefined;
+        var reader: std.Io.File.Reader = undefined;
         var writer: std.Io.Writer = undefined;
 
-        if (std.fs.path.isAbsolute(file_path)) {
-            file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_only });
+        if (std.Io.Dir.path.isAbsolute(file_path)) {
+            file = try std.Io.Dir.openFileAbsolute(io, file_path, .{ .mode = .read_only });
         } else {
-            file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only });
+            file = try std.Io.Dir.cwd().openFile(io, file_path, .{ .mode = .read_only });
         }
-        defer file.close();
+        defer file.close(io);
 
         // Source is ROM file
-        reader = file.reader(&buffer);
+        reader = file.reader(io, &buffer);
 
         // Sink is the emulator's memory region meant to load the ROM
         writer = std.Io.Writer.fixed(self.memory[cfg.CHIP8_PROGRAM_LOAD_ADDR..]);
@@ -440,12 +441,12 @@ pub const Chip8 = struct {
 const testing = std.testing;
 
 test "init" {
-    const emulator = Chip8.init();
+    const emulator = Chip8.init(std.testing.io);
     try testing.expect(std.mem.eql(u8, gen_default_bitmaps()[0..], emulator.memory[0..cfg.CHIP8_CHAR_SET_SIZE]));
 }
 
 test "stack" {
-    var emulator = Chip8.init();
+    var emulator = Chip8.init(std.testing.io);
 
     try testing.expectError(EmulatorError.StackEmpty, emulator.popa());
     try testing.expect(emulator.regs.sp == std.math.maxInt(u8));
@@ -466,20 +467,20 @@ test "stack" {
 }
 
 test "loader" {
-    var emulator = Chip8.init();
+    var emulator = Chip8.init(std.testing.io);
 
     var file_buffer: [256]u8 = undefined;
-    var file = try std.fs.cwd().createFile("test.bin", .{
+    var file = try std.Io.Dir.cwd().createFile(std.testing.io, "test.bin", .{
         .truncate = true,
         .read = false,
     });
-    defer file.close();
-    var file_writer = file.writer(&file_buffer);
+    defer file.close(std.testing.io);
+    var file_writer = file.writer(std.testing.io, &file_buffer);
     try file_writer.interface.splatBytesAll(&.{ 0xDE, 0xAD, 0xC0, 0xDE }, 0x100);
     try file_writer.interface.flush();
 
-    try testing.expectError(error.FileNotFound, emulator.loadROM("test1.bin"));
-    try emulator.loadROM("test.bin");
+    try testing.expectError(error.FileNotFound, emulator.loadROM(std.testing.io, "test1.bin"));
+    try emulator.loadROM(std.testing.io, "test.bin");
     // Verify that the ROM is loaded in the proper place
     try testing.expect(std.mem.eql(u8, &(.{ 0xDE, 0xAD, 0xC0, 0xDE } ** 0x100), emulator.memory[cfg.CHIP8_PROGRAM_LOAD_ADDR .. cfg.CHIP8_PROGRAM_LOAD_ADDR + 0x400]));
     try testing.expect(std.mem.eql(u8, gen_default_bitmaps()[0..], emulator.memory[0..cfg.CHIP8_CHAR_SET_SIZE]));
@@ -489,6 +490,6 @@ test "loader" {
     try file_writer.interface.flush();
 
     // Binary too big for the emulator to load
-    try testing.expectError(error.WriteFailed, emulator.loadROM("test.bin"));
-    try std.fs.cwd().deleteFile("test.bin");
+    try testing.expectError(error.WriteFailed, emulator.loadROM(std.testing.io, "test.bin"));
+    try std.Io.Dir.cwd().deleteFile(std.testing.io, "test.bin");
 }

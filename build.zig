@@ -115,7 +115,7 @@ pub fn build(b: *std.Build) !void {
         const alloc = std.heap.page_allocator;
         var path: []u8 = undefined;
 
-        path = try std.fs.cwd().realpathAlloc(alloc, "lib\\win");
+        path = try std.Io.Dir.cwd().realPathFileAlloc(b.graph.io, "lib\\win", alloc);
 
         run_cmd.addPathDir(path);
     }
